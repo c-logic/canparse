@@ -308,7 +308,7 @@ class nmea2000:
     def decfp126464(self,data): #PGN List (Transmit and Receive)
         return {}
     
-    def decfp126208(self,data): #NMEA - Request group function
+    def decsp126208(self,data): #NMEA - Request group function
         match data[0]:
             case 0:
                 return {"function":"Request"}
@@ -332,11 +332,11 @@ class nmea2000:
     def decsp59392(self,data): #ISO Acknowledgement
         return { "control": data[0],
                  "groupfunc": data[1],
-                 "pgn#": Gu24(data,5)
+                 "pgn#": self.Gu24(data,5)
                 }
 
     def decsp59904(self,data): #ISO Request
-        return { "pgn#": Gu24(data,0) }
+        return { "pgn#": self.Gu24(data,0) }
 
     def decsp60160(self,data): #ISO Transport Protocol, Data Transfer
         return { "sid": data[0],
