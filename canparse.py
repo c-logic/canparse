@@ -15,6 +15,8 @@ class nmea2000:
 
         inputca = None
 
+        #if pgn != 126208:
+        #    return None
         #single frame
         if (pgn >= 59392 and pgn <= 60928) or pgn == 61184 or (pgn >= 61440 and pgn <= 65279) or (pgn >= 65280 and pgn <= 65535) or (pgn >= 126208 and pgn <= 126464):
                 if (ca := getattr(self, f"decsp{pgn}",None)) is None and pgn == 61184 or (pgn >= 65280 and pgn <= 65535):
@@ -38,7 +40,7 @@ class nmea2000:
         if inputca is not None:
             try:
                 data = inputca[0](inputca[1])
-            except:
+            except IndexError:
                 data = self.retparseerror(inputca[1])
             return (pgn,data)
         return None
@@ -219,7 +221,7 @@ class nmea2000:
         return {"sid":data[0], "connection": data[1], "voltage": self.Gd16(data,2,0.1), "voltage3to1": self.Gd16(data,4,0.1), "frequency": self.Gd16(data,6,0.01)}
 
     operatorstate=("Off", "Low Power Mode", "Fault", "Bulk", "Absorption", "Float", "Storage", "Equalize", "Pass thru", "Inverting", "Assisting")
-    warningerrorstate=("Good", "Warning", "Error")
+    warningserrorstate=("Good", "Warning", "Error")
     def decsp127750(self, data): #Converter Status
         return {"sid":data[0], "connection": data[1],
                 "operationState": data[2], "operatorStateName": self.getname(self.operatorstate, data[2], 8),
@@ -309,23 +311,25 @@ class nmea2000:
         return {}
     
     def decsp126208(self,data): #NMEA - Request group function
+        ret = {"data": " ".join([f"{i:02x}" for i in data])}
         match data[0]:
             case 0:
-                return {"function":"Request"}
+                ret["function"]="Request"
             case 1:
-                return {"function":"Command"}
+                ret["function"]="Command"
             case 2:
-                return {"function":"Acknowledge"}
+                ret["function"]="Acknowledge"
             case 3:
-                return {"function":"Read Fields"}
+                ret["function"]="Read Fields"
             case 4:
-                return {"function":"Read Fields Reply"}
+                ret["function"]="Read Fields Reply"
             case 5:
-                return {"function":"Write Fields"}
+                ret["function"]="Write Fields"
             case 6:
-                return {"function":"Write Fields Reply"}
+                ret["function"]="Write Fields Reply"
             case _:
-                return {"function": data[0]}
+                ret["function"]=data[0]
+        return ret
 
     #0xE800-0xEE00 ISO 11783 (protocol)	Single frame
     #59392 - 60928
@@ -500,5 +504,6 @@ nmob=nmea2000(can.Bus(interface="ixxat",channel=0,bitrate=250000))
 while True:
     i=nmob.receivenext()
     if i is not None:
-        print(i)
+        if i[0]==126208:
+            print(i)
 
