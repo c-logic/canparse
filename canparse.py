@@ -13,55 +13,35 @@ class nmea2000:
         msg = self.bus.recv()
         priority, source, pgn = self.decodepgn(msg.arbitration_id)
 
-        data = None
+        inputca = None
 
         #single frame
         if (pgn >= 59392 and pgn <= 60928) or pgn == 61184 or (pgn >= 61440 and pgn <= 65279) or (pgn >= 65280 and pgn <= 65535) or (pgn >= 126208 and pgn <= 126464):
-            try:
-                ca = getattr(self, f"decsp{pgn}")
-                data = ca(msg.data)
-            except:
-                if pgn == 61184 or (pgn >= 65280 and pgn <= 65535):
-                    data = self.retstandard(msg.data)
+                if (ca := getattr(self, f"decsp{pgn}",None)) is None and pgn == 61184 or (pgn >= 65280 and pgn <= 65535):
+                    inputca = (self.retstandard, msg.data)
                 else:
-                    data = None
+                    inputca = (ca, msg.data)
         #fast packet
         elif pgn == 126720 or (pgn >= 130816 and pgn <= 131071):
-            data = self.pushfastpacket(pgn,msg.data)
-            if data is not None:
-                try:
-                    ca = getattr(self, f"decfp{pgn}")
-                    data = ca(data)
-                except:
-                    data = self.retstandard(data)
+            if (data := self.pushfastpacket(pgn,msg.data)) is not None:
+                if (ca := getattr(self, f"decfp{pgn}",None)) is None:
+                    inputca = (self.retstandard, data)
+                else:
+                    inputca = (ca, data)
         elif pgn >= 126976 and pgn <= 130815:
+            if (ca:= getattr(self, f"decsp{pgn}",None)) is not None:
+                inputca = (ca, msg.data)
+            elif (ca:= getattr(self, f"decfp{pgn}",None)) is not None:
+                if (data := self.pushfastpacket(pgn, msg.data)) is not None:
+                    inputca = (ca, data)
+
+        if inputca is not None:
             try:
-                ca = getattr(self, f"decsp{pgn}")
+                data = inputca[0](inputca[1])
             except:
-                ca = None
-
-            if ca is not None:
-                try:
-                    data = ca(msg.data)
-                except:
-                    data = {"ParseError":len(data)}
-            else:
-                try:
-                    ca = getattr(self, f"decfp{pgn}")
-                except:
-                    ca = None
-
-                if ca is not None:
-                    data = self.pushfastpacket(pgn,msg.data)
-                    try:
-                        data = ca(data) if data is not None else None
-                    except:
-                        data = {"ParseError":len(data)}
-
-        if data is not None:
-            data["pgn"]=pgn
-        return data
-
+                data = self.retparseerror(inputca[1])
+            return (pgn,data)
+        return None
     #strings
     def GfixString(self, data, idx, length):
         d = data[idx:idx+length]
@@ -79,20 +59,16 @@ class nmea2000:
         return None if msg[idx] == 0xff else msg[idx]
 
     def Gu16(self, msg, idx):
-        d = unpack("H",msg[idx:idx+2])[0]
-        return None if d == 0xFFFF else d
+        return None if (d := unpack("H",msg[idx:idx+2])[0]) == 0xFFFF else d
 
     def Gu24(self, msg, idx):
-        d = (unpack("H",msg[idx+1:idx+3])[0]<<8) | msg[idx+2]
-        return None if d == 0xFF_FFFF else d
+        return None if (d := (unpack("H",msg[idx+1:idx+3])[0]<<8) | msg[idx+2]) == 0xFF_FFFF else d
 
     def Gu32(self, msg, idx):
-        d = unpack("I",msg[idx:idx+4])[0]
-        return None if d == 0xFFFF_FFFF else d 
+        return None if (d := unpack("I",msg[idx:idx+4])[0]) == 0xFFFF_FFFF else d 
 
     def Gu64(self, msg, idx):
-        d = unpack("Q",msg[idx:idx+8])[0]
-        return None if d == 0xFFFF_FFFF_FFFF_FFFF else d 
+        return None if (d:= unpack("Q",msg[idx:idx+8])[0]) == 0xFFFF_FFFF_FFFF_FFFF else d 
 
     #signed int
     def Gi8(self, msg, idx):
@@ -133,31 +109,26 @@ class nmea2000:
 
     #unsigned double
     def Gud8(self, msg, idx, calc=1.):
-        d = self.Gu8(msg, idx)
-        return None if d is None else d * calc 
+        return None if (d := self.Gu8(msg, idx)) is None else d * calc 
 
     def Gud16(self, msg, idx, calc=1.):
-        d = self.Gu16(msg, idx)
-        return None if d is None else d * calc 
+        return None if (d := self.Gu16(msg, idx)) is None else d * calc 
 
     def Gud24(self, msg,idx, calc=1.):
-        d = self.Gu24(msg, idx)
-        return None if d is None else d * calc 
+        return None if (d := self.Gu24(msg, idx)) is None else d * calc 
 
     def Gud32(self, msg,idx, calc=1.):
-        d = self.Gu32(msg, idx)
-        return None if d is None else d * calc 
+        return None if (d := self.Gu32(msg, idx)) is None else d * calc 
 
     def pushfastpacket(self, pgn, msg):
         sc = msg[0] >> 5 #session counter
         fc = msg[0] & 0x1f #frame counter
 
         bufferid = pgn*8+sc
-        ret = None
 
         if fc == 0:
             datalen = msg[1]
-            if datalen==0:
+            if datalen == 0:
                 return ""
             data=[None]*int(ceil((datalen - 6) / 7)+1)
             data[0]=msg[2:]
@@ -169,7 +140,8 @@ class nmea2000:
                 if all(v is not None for v in self.buffer[bufferid][1]):
                     ret = b''.join(self.buffer[bufferid][1])[:self.buffer[bufferid][0]]
                     del self.buffer[bufferid]
-        return ret
+                    return ret
+        return None
 
     def getname(self, tup, idx, en = None, notfound = "Unavailable"):
         if isinstance(tup, tuple):
@@ -186,6 +158,18 @@ class nmea2000:
     def decodepgn(self, arb):
         return (arb & 0x1c000000) >> 26, arb & 0x000000ff, (arb & 0x3ffff00) >> 8
 
+    manufactorcode = {69: "ARKS Enterprises, Inc.", 78: "FW Murphy/Enovation Controls", 80: "Twin Disc", 85: "Kohler Power Systems", 88: "Hemisphere GPS Inc", 116: "BEP Marine", 135: "Airmar", 137: "Maretron", 140: "Lowrance", 144: "Mercury Marine", 147: "Nautibus Electronic GmbH", 148: "Blue Water Data", 154: "Westerbeke", 161: "Offshore Systems (UK) Ltd.", 163: "Evinrude/BRP", 165: "CPAC Systems AB", 168: "Xantrex Technology Inc.", 172: "Yanmar Marine", 174: "Volvo Penta", 175: "Honda Marine", 176: "Carling Technologies Inc. (Moritz Aerospace)", 185: "Beede Instruments", 192: "Floscan Instrument Co. Inc.", 193: "Nobletec", 198: "Mystic Valley Communications", 199: "Actia", 200: "Honda Marine", 201: "Disenos Y Technologia", 211: "Digital Switching Systems", 215: "Xintex/Atena", 224: "EMMI NETWORK S.L.", 225: "Honda Marine", 228: "ZF", 229: "Garmin", 233: "Yacht Monitoring Solutions", 235: "Sailormade Marine Telemetry/Tetra Technology LTD", 243: "Eride", 250: "Honda Marine", 257: "Honda Motor Company LTD", 272: "Groco", 273: "Actisense", 274: "Amphenol LTW Technology", 275: "Navico", 283: "Hamilton Jet", 285: "Sea Recovery", 286: "Coelmo SRL Italy", 295: "BEP Marine", 304: "Empir Bus", 305: "NovAtel", 306: "Sleipner Motor AS", 307: "MBW Technologies", 311: "Fischer Panda", 315: "ICOM", 328: "Qwerty", 329: "Dief", 341: "Boening Automationstechnologie GmbH & Co. KG", 345: "Korean Maritime University", 351: "Thrane and Thrane", 355: "Mastervolt", 356: "Fischer Panda Generators", 358: "Victron Energy", 370: "Rolls Royce Marine", 373: "Electronic Design", 374: "Northern Lights", 378: "Glendinning", 381: "B & G", 384: "Rose Point Navigation Systems", 385: "Johnson Outdoors Marine Electronics Inc Geonav", 394: "Capi 2", 396: "Beyond Measure", 400: "Livorsi Marine", 404: "ComNav", 409: "Chetco", 419: "Fusion Electronics", 421: "Standard Horizon", 422: "True Heading AB", 426: "Egersund Marine Electronics AS", 427: "em-trak Marine Electronics", 431: "Tohatsu Co, JP", 437: "Digital Yacht", 438: "Comar Systems Limited", 440: "Cummins", 443: "VDO (aka Continental-Corporation)", 451: "Parker Hannifin aka Village Marine Tech", 459: "Alltek Marine Electronics Corp", 460: "SAN GIORGIO S.E.I.N", 466: "Veethree Electronics & Marine", 467: "Humminbird Marine Electronics", 470: "SI-TEX Marine Electronics", 471: "Sea Cross Marine AB", 475: "GME aka Standard Communications Pty LTD", 476: "Humminbird Marine Electronics", 478: "Ocean Sat BV", 481: "Chetco Digitial Instruments", 493: "Watcheye", 499: "Lcj Capteurs", 502: "Attwood Marine", 503: "Naviop S.R.L.", 504: "Vesper Marine Ltd", 510: "Marinesoft Co. LTD", 517: "NoLand Engineering", 518: "Transas USA", 529: "National Instruments Korea", 532: "Onwa Marine", 571: "Marinecraft (South Korea)", 573: "McMurdo Group aka Orolia LTD", 578: "Advansea", 579: "KVH", 580: "San Jose Technology", 583: "Yacht Control", 586: "Suzuki Motor Corporation", 591: "US Coast Guard", 595: "Ship Module aka Customware", 600: "Aquatic AV", 605: "Aventics GmbH", 606: "Intellian", 612: "SamwonIT", 614: "Arlt Tecnologies", 637: "Bavaria Yacts", 641: "Diverse Yacht Services", 644: "Wema U.S.A dba KUS", 645: "Garmin", 658: "Shenzhen Jiuzhou Himunication", 688: "Rockford Corp", 704: "JL Audio", 715: "Autonnic", 717: "Yacht Devices", 734: "REAP Systems", 735: "Au Electronics Group", 739: "LxNav", 743: "DaeMyung", 744: "Woosung", 773: "Clarion US", 776: "HMI Systems", 777: "Ocean Signal", 778: "Seekeeper", 781: "Poly Planar", 785: "Fischer Panda DE", 795: "Broyda Industries", 796: "Canadian Automotive", 797: "Tides Marine", 798: "Lumishore", 799: "Still Water Designs and Audio", 802: "BJ Technologies (Beneteau)", 803: "Gill Sensors", 811: "Blue Water Desalination", 815: "FLIR", 824: "Undheim Systems", 838: "TeamSurv", 844: "Fell Marine", 847: "Oceanvolt", 862: "Prospec", 868: "Data Panel Corp", 890: "L3 Technologies", 894: "Rhodan Marine Systems", 896: "Nexfour Solutions", 905: "ASA Electronics", 909: "Marines Co (South Korea)", 911: "Nautic-on", 930: "Ecotronix", 962: "Timbolier Industries", 963: "TJC Micro", 968: "Cox Powertrain", 969: "Blue Seas", 1417: "Revatek", 1850: "Teleflex Marine (SeaStar Solutions)", 1851: "Raymarine", 1852: "Navionics", 1853: "Japan Radio Co", 1854: "Northstar Technologies", 1855: "Furuno", 1856: "Trimble", 1857: "Simrad", 1858: "Litton", 1859: "Kvasar AB", 1860: "MMP", 1861: "Vector Cantech", 1862: "Yamaha Marine", 1863: "Faria Instruments"}
+    industrycode = ("Global", "Highway", "Agriculture", "Construction", "Marine", "Industrial")
+    def retstandard(self,data):
+        return {"mcode": self.Gu16(data,0) & 0x7ff,
+        "manufactur": self.manufactorcode[self.Gu16(data,0) & 0x7ff] if (self.Gu16(data,0) & 0x7ff) in self.manufactorcode else None,
+        "icode": (self.Gu16(data,0) >> 13) & 7,
+        "inducode": self.getname(self.industrycode,(self.Gu16(data,0) >> 13) & 7),
+        "data" : " ".join([f"{i:02x}" for i in data])}
+
+    def retparseerror(self,data):
+        return {"parseerror": " ".join([f"{i:02x}" for i in data])}
+    
     def decsp126992(self, data): #System Time
         return {"sid": self.Gu8(data,0), "source": data[1] & 7, "days": self.Gu16(data,2), "seconds": self.Gud32(data,4,0.0001)}
 
@@ -262,10 +246,10 @@ class nmea2000:
                 "source": data[2], "sourcename": self.getname(self.humsource, data[2]),
                 "actual": self.Gd16(data,3,.004), "set": self.Gd16(data,5,0.004) }
 
-    presssource = ("Atmospheric", "Water", "Steam", "Compressed Air", "Hydraulic", "Filter", "AltimeterSetting", "Oil", "Fuel")
+    pressuresource = ("Atmospheric", "Water", "Steam", "Compressed Air", "Hydraulic", "Filter", "AltimeterSetting", "Oil", "Fuel")
     def decsp130314(self, data): #Actual Pressure
         return {"sid":data[0], "instance": data[1],
-                "source": data[2], "sourceName": self.getname(self.presssource, data[2]),
+                "source": data[2], "sourceName": self.getname(self.pressuresource, data[2]),
                 "pressure": self.Gd32(data,3,.004)}
 
     def decsp130316(self, data): #Temperature Extended Range
@@ -472,16 +456,6 @@ class nmea2000:
                 "angle": self.Gud16(data,3,0.0001), #rad
                 "ref": self.getname(self.windref,data[5] & 7)}
 
-    mancode= {69: "ARKS Enterprises, Inc.", 78: "FW Murphy/Enovation Controls", 80: "Twin Disc", 85: "Kohler Power Systems", 88: "Hemisphere GPS Inc", 116: "BEP Marine", 135: "Airmar", 137: "Maretron", 140: "Lowrance", 144: "Mercury Marine", 147: "Nautibus Electronic GmbH", 148: "Blue Water Data", 154: "Westerbeke", 161: "Offshore Systems (UK) Ltd.", 163: "Evinrude/BRP", 165: "CPAC Systems AB", 168: "Xantrex Technology Inc.", 172: "Yanmar Marine", 174: "Volvo Penta", 175: "Honda Marine", 176: "Carling Technologies Inc. (Moritz Aerospace)", 185: "Beede Instruments", 192: "Floscan Instrument Co. Inc.", 193: "Nobletec", 198: "Mystic Valley Communications", 199: "Actia", 200: "Honda Marine", 201: "Disenos Y Technologia", 211: "Digital Switching Systems", 215: "Xintex/Atena", 224: "EMMI NETWORK S.L.", 225: "Honda Marine", 228: "ZF", 229: "Garmin", 233: "Yacht Monitoring Solutions", 235: "Sailormade Marine Telemetry/Tetra Technology LTD", 243: "Eride", 250: "Honda Marine", 257: "Honda Motor Company LTD", 272: "Groco", 273: "Actisense", 274: "Amphenol LTW Technology", 275: "Navico", 283: "Hamilton Jet", 285: "Sea Recovery", 286: "Coelmo SRL Italy", 295: "BEP Marine", 304: "Empir Bus", 305: "NovAtel", 306: "Sleipner Motor AS", 307: "MBW Technologies", 311: "Fischer Panda", 315: "ICOM", 328: "Qwerty", 329: "Dief", 341: "Boening Automationstechnologie GmbH & Co. KG", 345: "Korean Maritime University", 351: "Thrane and Thrane", 355: "Mastervolt", 356: "Fischer Panda Generators", 358: "Victron Energy", 370: "Rolls Royce Marine", 373: "Electronic Design", 374: "Northern Lights", 378: "Glendinning", 381: "B & G", 384: "Rose Point Navigation Systems", 385: "Johnson Outdoors Marine Electronics Inc Geonav", 394: "Capi 2", 396: "Beyond Measure", 400: "Livorsi Marine", 404: "ComNav", 409: "Chetco", 419: "Fusion Electronics", 421: "Standard Horizon", 422: "True Heading AB", 426: "Egersund Marine Electronics AS", 427: "em-trak Marine Electronics", 431: "Tohatsu Co, JP", 437: "Digital Yacht", 438: "Comar Systems Limited", 440: "Cummins", 443: "VDO (aka Continental-Corporation)", 451: "Parker Hannifin aka Village Marine Tech", 459: "Alltek Marine Electronics Corp", 460: "SAN GIORGIO S.E.I.N", 466: "Veethree Electronics & Marine", 467: "Humminbird Marine Electronics", 470: "SI-TEX Marine Electronics", 471: "Sea Cross Marine AB", 475: "GME aka Standard Communications Pty LTD", 476: "Humminbird Marine Electronics", 478: "Ocean Sat BV", 481: "Chetco Digitial Instruments", 493: "Watcheye", 499: "Lcj Capteurs", 502: "Attwood Marine", 503: "Naviop S.R.L.", 504: "Vesper Marine Ltd", 510: "Marinesoft Co. LTD", 517: "NoLand Engineering", 518: "Transas USA", 529: "National Instruments Korea", 532: "Onwa Marine", 571: "Marinecraft (South Korea)", 573: "McMurdo Group aka Orolia LTD", 578: "Advansea", 579: "KVH", 580: "San Jose Technology", 583: "Yacht Control", 586: "Suzuki Motor Corporation", 591: "US Coast Guard", 595: "Ship Module aka Customware", 600: "Aquatic AV", 605: "Aventics GmbH", 606: "Intellian", 612: "SamwonIT", 614: "Arlt Tecnologies", 637: "Bavaria Yacts", 641: "Diverse Yacht Services", 644: "Wema U.S.A dba KUS", 645: "Garmin", 658: "Shenzhen Jiuzhou Himunication", 688: "Rockford Corp", 704: "JL Audio", 715: "Autonnic", 717: "Yacht Devices", 734: "REAP Systems", 735: "Au Electronics Group", 739: "LxNav", 743: "DaeMyung", 744: "Woosung", 773: "Clarion US", 776: "HMI Systems", 777: "Ocean Signal", 778: "Seekeeper", 781: "Poly Planar", 785: "Fischer Panda DE", 795: "Broyda Industries", 796: "Canadian Automotive", 797: "Tides Marine", 798: "Lumishore", 799: "Still Water Designs and Audio", 802: "BJ Technologies (Beneteau)", 803: "Gill Sensors", 811: "Blue Water Desalination", 815: "FLIR", 824: "Undheim Systems", 838: "TeamSurv", 844: "Fell Marine", 847: "Oceanvolt", 862: "Prospec", 868: "Data Panel Corp", 890: "L3 Technologies", 894: "Rhodan Marine Systems", 896: "Nexfour Solutions", 905: "ASA Electronics", 909: "Marines Co (South Korea)", 911: "Nautic-on", 930: "Ecotronix", 962: "Timbolier Industries", 963: "TJC Micro", 968: "Cox Powertrain", 969: "Blue Seas", 1417: "Revatek", 1850: "Teleflex Marine (SeaStar Solutions)", 1851: "Raymarine", 1852: "Navionics", 1853: "Japan Radio Co", 1854: "Northstar Technologies", 1855: "Furuno", 1856: "Trimble", 1857: "Simrad", 1858: "Litton", 1859: "Kvasar AB", 1860: "MMP", 1861: "Vector Cantech", 1862: "Yamaha Marine", 1863: "Faria Instruments"}
-    inducode= ("Global", "Highway", "Agriculture", "Construction", "Marine", "Industrial")
-
-    def retstandard(self,data):
-        return {"mcode": self.Gu16(data,0) & 0x7ff,
-        "manufactur": self.mancode[self.Gu16(data,0) & 0x7ff] if (self.Gu16(data,0) & 0x7ff) in self.mancode else None,
-        "icode": (self.Gu16(data,0) >> 13) & 7,
-        "inducode": self.getname(self.inducode,(self.Gu16(data,0) >> 13) & 7),
-        "data" : " ".join([f"{i:02x}" for i in data])}
-    
     #0x1FF00-0x1FFFF: Manufacturer Specific fast-packet non-addressed
     #130816 - 131071
 ##    def decfp130822(self,data): #Navico
